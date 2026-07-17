@@ -3,11 +3,10 @@
 -- ElementToQuickDraw, ElementToStorm, windower.*
 
 local function DegeiReaction(args)
-	atc("Reacted")
 	if args[2] == nil then
 		return
 	end
-	atc("updating element")
+
 	UpdateSkillchainElementFromReact(TitleCase(args[2]))
 	local player = windower.ffxi.get_player()
 	local WasBursting = BurstActive
