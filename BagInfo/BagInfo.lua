@@ -12,12 +12,12 @@ Commands:
     //bag pos <x> <y>       - Set display position
     //bag help              - Show help
 
-Author: Claude Code
+Author: EvilPotat0 + Claude Code
 Version: 2.0.0
 ]]
 
 _addon.name = 'BagInfo'
-_addon.author = 'Claude Code'
+_addon.author = 'EvilPotat0 + Claude Code'
 _addon.version = '2.0.0'
 _addon.commands = {'bag', 'baginfo'}
 
