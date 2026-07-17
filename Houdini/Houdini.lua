@@ -305,19 +305,13 @@ function CastAoE(Spell)
 end
 
 function CancelBurst()
-	atc("cancel")
 	if BurstActive then
 		BurstActive = false
-		atc("canceled")
 		TimeDelay = DefaultDelay
 	end
 end
 
 function StartBurst(SkillChainOrElement, IgnoreLeader)
-	if IgnoreLeader > 0 then
-		atc("IgnoreLeader")
-	end
-
 	if BurstActive then
 		atc("IgnoringBurstAlreadyActive")
 		return
@@ -614,7 +608,6 @@ windower.register_event('addon command', function (command,...)
 				Settings.leader = false
 			elseif args[1] == '1' then
 				LeaderNotDoingSC = 1
-				atc("NotDoingSC")
 			end
 		else
 			Settings.leader = not Settings.leader
