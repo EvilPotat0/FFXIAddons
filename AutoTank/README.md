@@ -1,7 +1,7 @@
 # AutoTank
 
 **Version:** 1.0.0
-**Author:** YourName
+**Author:** EvilPotat0
 **Last Updated:** 2026.01.29
 
 ## Overview
