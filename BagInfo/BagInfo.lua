@@ -5,10 +5,13 @@ Shows current/max item counts for various inventory bags and currency amounts
 Commands:
     //bag toggle <bag>      - Toggle bag display on/off
     //bag currency <name>   - Toggle currency display on/off
+    //bag merit             - Toggle Merit Points display on/off
     //bag all               - Show all bags
     //bag allcurrency       - Show all currencies
     //bag none              - Hide all bags except inventory
     //bag nocurrency        - Hide all currencies
+    //bag refresh           - Force a currency update from the server
+    //bag zonedelay <secs>  - Set delay before requesting currencies on zone
     //bag pos <x> <y>       - Set display position
     //bag help              - Show help
 
@@ -29,6 +32,7 @@ local packets = require('packets')
 -- Default settings
 local defaults = {
     pos = {x = 0, y = 500},
+    zone_request_delay = 10,
     show_bags = {
         inventory = true,
         safe = false,
@@ -66,7 +70,14 @@ local defaults = {
         plasm = false,
         escha_silt = false,
         escha_beads = false,
-    }
+        gallimaufry = false,
+        temenos_units = false,
+        apollyon_units = false,
+    },
+    show_merits = false,
+    merit_points = 0,
+    merit_max = 0,
+    merit_limit_points = 0,
 }
 
 -- Load settings
@@ -132,6 +143,9 @@ local currency_keys = {
     plasm = 'mweya_plasm',
     escha_silt = 'escha_silt',
     escha_beads = 'escha_beads',
+    gallimaufry = 'gallimaufry',
+    temenos_units = 'temenos_units',
+    apollyon_units = 'apollyon_units',
 }
 
 -- Display names for currencies
@@ -154,6 +168,9 @@ local currency_names = {
     plasm = 'Mweya Plasm',
     escha_silt = 'Escha Silt',
     escha_beads = 'Escha Beads',
+    gallimaufry = 'Gallimaufry',
+    temenos_units = 'Temenos Units',
+    apollyon_units = 'Apollyon Units',
 }
 
 -- Currency display order
@@ -163,11 +180,12 @@ local currency_order = {
     'conquest_points', 'imperial_standing', 'allied_notes',
     'cruor', 'resistance_credits', 'dominion_notes',
     'coalition_imprimaturs', 'plasm', 'escha_silt', 'escha_beads',
+    'gallimaufry', 'temenos_units', 'apollyon_units',
 }
 
 -- Currency values storage (populated from network packets)
 -- Packet 0x113 (Currency Info I): sparks, imperial_standing, conquest_points, allied_notes, cruor, resistance_credits, dominion_notes
--- Packet 0x118 (Currency Info II): bayld, coalition_imprimaturs, plasm, escha_beads, escha_silt, hallmarks, gallantry
+-- Packet 0x118 (Currency Info II): bayld, coalition_imprimaturs, plasm, escha_beads, escha_silt, hallmarks, gallantry, gallimaufry, temenos_units, apollyon_units
 -- Packet 0x061 (Character Info): unity_accolades
 -- Packet 0x063 (Character Stats): capacity_points
 -- Gil: Available directly from windower.ffxi.get_items()
@@ -191,7 +209,18 @@ local currency_values = {
     plasm = 0,
     escha_silt = 0,
     escha_beads = 0,
+    gallimaufry = 0,
+    temenos_units = 0,
+    apollyon_units = 0,
 }
+
+-- Merit Points are not a currency - they're capped points from the Merit Points menu.
+-- Windower has no known request packet that opens that menu for us (unlike Job Points/
+-- Currencies), so settings.merit_points/merit_max are seeded once from a real incoming
+-- packet 0x063 Order 2 (i.e. the player opens the Merit Points menu at least once) and then
+-- persisted in settings and kept live afterward by tracking Limit Point gain (kill message
+-- 0x02D, msg 371/372) and merit spend/refund (outgoing 0x0BE), so it survives zones/relogs
+-- without needing the menu reopened.
 
 -- On-screen display
 local display = texts.new('${content}', {
@@ -293,17 +322,28 @@ local function update_display()
         end
     end
 
+    -- Display merit points
+    local merit_parts = {}
+    if settings.show_merits then
+        table.insert(merit_parts, string.format('\\cs(200,200,255)Merit Points: %d/%d\\cr',
+            settings.merit_points, settings.merit_max))
+    end
+
     local all_parts = {}
     for _, p in ipairs(bag_parts) do table.insert(all_parts, p) end
-    if #bag_parts > 0 and #currency_parts > 0 then
+    if #bag_parts > 0 and (#currency_parts > 0 or #merit_parts > 0) then
         table.insert(all_parts, '\\cs(100,100,100)|\\cr')
     end
     for _, p in ipairs(currency_parts) do table.insert(all_parts, p) end
+    if #currency_parts > 0 and #merit_parts > 0 then
+        table.insert(all_parts, '\\cs(100,100,100)|\\cr')
+    end
+    for _, p in ipairs(merit_parts) do table.insert(all_parts, p) end
 
     if #all_parts > 0 then
         table.insert(lines, table.concat(all_parts, '  '))
     else
-        table.insert(lines, 'No bags/currencies enabled')
+        table.insert(lines, 'No bags/currencies/merits enabled')
     end
 
     display.content = table.concat(lines, '\n')
@@ -315,17 +355,33 @@ local function save_settings()
     settings:save('all')
 end
 
+-- Request currency updates from the server without needing to open the
+-- Currency / Currency 2 / Job Points menus manually. These are the same
+-- empty-body requests the client sends when you open those menus yourself.
+-- Note: there is no known equivalent request for the Merit Points menu, so
+-- merit values are tracked separately (see incoming 0x02D / outgoing 0x0BE below).
+local last_currency_request = 0
+local function request_currency_update()
+    packets.inject(packets.new('outgoing', 0x10F)) -- Currency Menu -> triggers incoming 0x113
+    packets.inject(packets.new('outgoing', 0x115)) -- Currency 2 Menu -> triggers incoming 0x118
+    packets.inject(packets.new('outgoing', 0x0C0)) -- Job Point Menu -> triggers incoming 0x063 (Capacity Points)
+    last_currency_request = os.clock()
+end
+
 -- Show help
 local function show_help()
     log('=== BagInfo Help ===')
     log('//bag toggle <bag>      - Toggle bag display')
     log('//bag currency <name>   - Toggle currency display')
+    log('//bag merit             - Toggle Merit Points display')
     log('//bag all               - Show all available bags')
     log('//bag allcurrency       - Show all currencies')
     log('//bag none              - Hide all bags except inventory')
     log('//bag nocurrency        - Hide all currencies')
     log('//bag pos <x> <y>       - Set display position')
     log('//bag status            - Show current settings')
+    log('//bag refresh           - Force a currency update from the server')
+    log('//bag zonedelay <secs>  - Set delay before requesting currencies on zone')
     log('//bag debug             - Debug currency data')
     log('//bag help              - Show this help')
     log('')
@@ -338,11 +394,17 @@ local function show_help()
     log('  capacity_points, login_points, conquest_points, imperial_standing')
     log('  allied_notes, cruor, resistance_credits, dominion_notes')
     log('  coalition_imprimaturs, plasm, escha_silt, escha_beads')
+    log('  gallimaufry, temenos_units, apollyon_units')
+    log('')
+    log('Merit Points are shown separately via //bag merit (not a currency).')
+    log('Open the Merit Points menu once to seed the value - after that it')
+    log('tracks automatically (combat gains and spending) and survives zoning/relogging.')
     log('')
     log('Examples:')
     log('  //bag toggle satchel')
     log('  //bag currency gil')
     log('  //bag currency bayld')
+    log('  //bag merit')
 end
 
 -- Show current settings
@@ -378,6 +440,17 @@ local function show_status()
     if not any_currencies then
         log('  (none)')
     end
+
+    log('')
+    log('Merit Points:')
+    if settings.show_merits then
+        log('  %d/%d', settings.merit_points, settings.merit_max)
+    else
+        log('  (hidden)')
+    end
+
+    log('')
+    log('Zone currency request delay: %d seconds', settings.zone_request_delay)
 end
 
 -- Debug: Show all available currency data
@@ -500,11 +573,18 @@ windower.register_event('addon command', function(command, ...)
             log('  capacity_points, login_points, conquest_points, imperial_standing,')
             log('  allied_notes, cruor, resistance_credits, dominion_notes,')
             log('  coalition_imprimaturs, plasm, escha_silt, escha_beads')
+            log('  gallimaufry, temenos_units, apollyon_units')
             return
         end
 
         settings.show_currencies[currency_name] = not settings.show_currencies[currency_name]
         log('%s display: %s', currency_names[currency_name], settings.show_currencies[currency_name] and 'ON' or 'OFF')
+        save_settings()
+        update_display()
+
+    elseif command == 'merit' or command == 'merits' then
+        settings.show_merits = not settings.show_merits
+        log('Merit Points display: %s', settings.show_merits and 'ON' or 'OFF')
         save_settings()
         update_display()
 
@@ -564,8 +644,28 @@ windower.register_event('addon command', function(command, ...)
         save_settings()
         log('Display position set to (%d, %d)', x, y)
 
+    elseif command == 'zonedelay' then
+        if #args == 0 then
+            error('Usage: //bag zonedelay <seconds>')
+            return
+        end
+
+        local delay = tonumber(args[1])
+        if not delay or delay < 0 then
+            error('Invalid delay value')
+            return
+        end
+
+        settings.zone_request_delay = delay
+        save_settings()
+        log('Zone currency request delay set to %d seconds', delay)
+
     elseif command == 'debug' then
         debug_currencies()
+
+    elseif command == 'refresh' then
+        request_currency_update()
+        log('Requested currency update from server')
 
     else
         error('Unknown command: ' .. command)
@@ -576,14 +676,14 @@ end)
 -- Initialize
 windower.register_event('load', function()
     log('BagInfo v2.0.0 loaded!')
-    log('Currencies will populate when you open menus or zone.')
-    log('Tip: Open Currency menu (Key Items > Currency) to trigger currency updates.')
+    request_currency_update()
     update_display()
 end)
 
--- Zone change event - currencies get updated when zoning
+-- Zone change event - request fresh currency values on zone, after a delay
+-- since the server isn't ready to respond immediately upon zoning in.
 windower.register_event('zone change', function()
-    -- Currency packets are sent after zoning, display will auto-update
+    coroutine.schedule(request_currency_update, settings.zone_request_delay)
 end)
 
 -- Update on item changes
@@ -595,8 +695,11 @@ windower.register_event('remove item', function()
     update_display()
 end)
 
--- Periodic update (every 5 seconds)
+-- Periodic update (time change fires roughly every few real seconds)
 windower.register_event('time change', function()
+    if os.clock() - last_currency_request > 300 then
+        request_currency_update()
+    end
     update_display()
 end)
 
@@ -687,6 +790,21 @@ windower.register_event('incoming chunk', function(id, data)
             currency_values.dominion_notes = packet['Domain Points']
         end
 
+        -- Gallimaufry
+        if packet['Gallimaufry'] then
+            currency_values.gallimaufry = packet['Gallimaufry']
+        end
+
+        -- Temenos Units
+        if packet['Temenos Units'] then
+            currency_values.temenos_units = packet['Temenos Units']
+        end
+
+        -- Apollyon Units
+        if packet['Apollyon Units'] then
+            currency_values.apollyon_units = packet['Apollyon Units']
+        end
+
         update_display()
 
     -- Packet 0x061: Character Info (includes Unity Accolades)
@@ -698,7 +816,7 @@ windower.register_event('incoming chunk', function(id, data)
 
         update_display()
 
-    -- Packet 0x063: Character Stats (includes Capacity Points)
+    -- Packet 0x063: Character Stats (includes Capacity Points and Merit Points)
     elseif id == 0x063 then
         -- This packet has multiple subtypes, we need Order 5 for Job Points
         if packet['Order'] == 5 then
@@ -712,7 +830,58 @@ windower.register_event('incoming chunk', function(id, data)
                     update_display()
                 end
             end
+
+        -- Order 2 carries Merit Points (not a currency - capped allocation points).
+        -- This is the only real source of truth for these values; seed it here, then
+        -- keep it live via the Limit Point / merit spend tracking below.
+        elseif packet['Order'] == 2 then
+            if packet['Merit Points'] then
+                settings.merit_points = packet['Merit Points']
+            end
+            if packet['Max Merit Points'] then
+                settings.merit_max = packet['Max Merit Points']
+            end
+            if packet['Limit Points'] then
+                settings.merit_limit_points = packet['Limit Points']
+            end
+            save_settings()
+            update_display()
         end
+
+    -- Packet 0x02D: Kill Message (also carries EXP/RoE/Limit Point/Capacity Point gains)
+    elseif id == 0x02D then
+        local msg = packet['Message']
+        if msg == 371 or msg == 372 then
+            -- Limit Point gain; every 10,000 Limit Points earns 1 Merit Point
+            settings.merit_limit_points = settings.merit_limit_points + (packet['Param 1'] or 0)
+            if settings.merit_limit_points >= 10000 and settings.merit_points < settings.merit_max then
+                settings.merit_points = math.min(
+                    settings.merit_points + math.floor(settings.merit_limit_points / 10000),
+                    settings.merit_max)
+                settings.merit_limit_points = settings.merit_limit_points % 10000
+            else
+                settings.merit_limit_points = math.min(settings.merit_limit_points, 9999)
+            end
+            save_settings()
+            update_display()
+        end
+    end
+end)
+
+-- Outgoing packet handler: track Merit Point spend/refund so the display stays
+-- accurate immediately, without waiting on a server round-trip.
+windower.register_event('outgoing chunk', function(id, data)
+    if id == 0x0BE then
+        local success, packet = pcall(packets.parse, 'outgoing', data)
+        if not success then return end
+
+        if packet['Flag'] == 1 then
+            settings.merit_points = math.max(settings.merit_points - 1, 0)
+        else
+            settings.merit_points = math.min(settings.merit_points + 1, settings.merit_max)
+        end
+        save_settings()
+        update_display()
     end
 end)
 
